@@ -5,28 +5,33 @@ import (
 	"github.com/tebeka/selenium"
 	"github.com/tebeka/selenium/chrome"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 )
 
 const seleniumPath = "./chromedriver.exe"
+const Core = 5
 
-var param = make(chan string)
-var result = make(chan string)
+var param = make([]chan string, Core)
+var result = make([]chan string, Core)
 
-func indexHttp(w http.ResponseWriter, r1 *http.Request) {
-	k := r1.FormValue("keyworld")
-	p := r1.FormValue("page")
+func indexHttp(w http.ResponseWriter, r *http.Request) {
+	k := r.FormValue("keyword")
+	p := r.FormValue("page")
 	if k != "" && p != "" {
-		param <- fmt.Sprintf("https://onlinelibrary.wiley.com/action/doSearch?Ppub=&field1=Keyword&text1=%s&pageSize=20&startPage=%s")
-		_, _ = w.Write([]byte(<-result))
-		fmt.Println("返回网页结果")
+		id := rand.Intn(Core)
+		fmt.Printf("keyword=%s page=%s\n", k, p)
+		go func() {
+			param[id] <- fmt.Sprintf("https://onlinelibrary.wiley.com/action/doSearch?Ppub=&field1=Keyword&text1=%s&pageSize=20&startPage=%s", k, p)
+		}()
+		_, _ = w.Write([]byte(<-result[id]))
 	} else {
-		_, _ = w.Write([]byte("参数不全"))
+		_, _ = w.Write([]byte("param null"))
 	}
 }
 
-func startSelenium() {
+func startSelenium(id int) {
 
 	addr, err := net.ResolveTCPAddr("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -43,13 +48,8 @@ func startSelenium() {
 	}
 
 	selenium.SetDebug(false)
-	service, _ := selenium.NewChromeDriverService(seleniumPath, port)
-	defer func(service *selenium.Service) {
-		err := service.Stop()
-		if err != nil {
-			return
-		}
-	}(service)
+	_, _ = selenium.NewChromeDriverService(seleniumPath, port)
+
 	caps := selenium.Capabilities{
 		"browserName": "chrome",
 	}
@@ -60,46 +60,33 @@ func startSelenium() {
 		Prefs: imgCaps,
 		Path:  "",
 		Args: []string{
-			//"--headless",
+			"--headless",
 			"--no-sandbox",
 			"--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.45 Safari/537.36",
 		},
 	}
 	caps.AddChrome(chromeCaps)
 
-	browner, e := selenium.NewRemote(caps, fmt.Sprintf("http://localhost:%d/wd/hub", port+i))
-	if err != nil {
-		return
-	}
+	browner, e := selenium.NewRemote(caps, fmt.Sprintf("http://localhost:%d/wd/hub", port))
+
 	if e != nil {
 		fmt.Println(e)
 	}
 
-	var window = [3]string{}
-
-	for i := 0; i < 3; i++ {
-		script, _ := browner.ExecuteScript(fmt.Sprintf(`window.open("%s", "_blank");`, url), nil)
-	}
-
 	for {
-		url := <-param
-		script, _ := browner.ExecuteScript(fmt.Sprintf(`window.open("%s", "_blank");`, url), nil)
+		url := <-param[id]
 		_ = browner.Get(url)
-
-		//print(script)
 		html, _ := browner.PageSource()
-		browner.SwitchSession(session)
-		browner.Get()
-		result <- html
+		result[id] <- html
 	}
 }
 
 func main() {
-
-	go startSelenium()
-
+	for i := 0; i < Core; i++ {
+		param[i] = make(chan string, Core)
+		result[i] = make(chan string, Core)
+		go startSelenium(i)
+	}
 	http.HandleFunc("/wiley", indexHttp)
-
 	log.Fatal(http.ListenAndServe(":8081", nil))
-
 }
